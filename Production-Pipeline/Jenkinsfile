@@ -1,0 +1,528 @@
+#!groovy
+import groovy.json.JsonSlurper
+
+def emailRecipients = 'mail@email.com'
+def approver = 'jenkins_user_id'
+def fail = ''
+def APP_DIR = ''
+def userInput = true
+def gitUrl = "${params.GIT_URL}"
+def GIT_BRANCH = "${params.GIT_BRANCH}"
+def ARTIFACT_PACKAGE = "${params.Artifact_Package}"
+def deployment_target = "${params.Deployment_Target}"
+def POM_GROUP_ID = ''
+def ARTIFACT_BUILD_NUMBER = ''
+def POM_ARTIFACT_ID = ''
+// def IS_JFROG_PACKAGE_EXISTS=false
+def POM_VERSION
+def deploymentStatus = ''
+def application_name = ''
+def ARTIFACT_FILENAME = ''
+
+def defineJob(GROUP_ID,application_name,ARTIFACT_PACKAGE,APP_DIR,GIT_BRANCH){
+	
+	currentBuild.displayName = application_name+"#"+ARTIFACT_PACKAGE
+	currentBuild.description = APP_DIR+"/"+GIT_BRANCH+"/"+GROUP_ID+"/"+application_name
+}
+
+
+def getRepoNameFromGitUrl(gitUrl) {
+    def parts = gitUrl.split('/')
+    if (parts.size() >= 2) {
+        // return parts[-2] + "/" + parts[-1].replaceAll("\\.git\$", "")
+        return parts[-1].replaceAll("\\.git\$", "")
+    }
+    return null
+}
+
+def compareVersions(version1, version2) {
+    def v1 = version1.split("\\.")
+    def v2 = version2.split("\\.")
+    
+    for (int i = 0; i < Math.max(v1.size(), v2.size()); i++) {
+        def num1 = i < v1.size() ? v1[i] as int : 0
+        def num2 = i < v2.size() ? v2[i] as int : 0
+        
+        if (num1 > num2) {
+            error "Deployed version is lower than the latest version."
+        }else if (num1 < num2) {
+            return 1
+        }
+
+        if (num1 == num2 && i == v1.size() - 1 && i == v2.size() - 1) {
+            error "Deployed version is equal to the latest version."
+        }
+    }
+    
+    return 0
+}
+
+def FetchLatestTag(APP_DIR){
+    try{
+        def tagname = sh(
+                script: """
+            curl -L \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                https://api.github.com/repos/{your-organization}/${APP_DIR}/tags
+
+            """,
+                returnStdout: true
+            ).trim()
+        def versions = readJSON text: tagname
+            if (versions) {
+                // echo "Available Tags:"
+                versions.each { version ->
+                    // echo version.name // Display the 'name' field
+                    version.name
+                }
+            } else {
+                echo "No Tag Found."
+            }
+    }catch (Exception e) {
+        echo "New Repository, Hence No Tag is available "
+    }
+}
+
+
+def mergeExecution(branchtype,GIT_BRANCH,APP_DIR){
+			
+			def firstbranch="develop"
+			def secondbranch="main"
+			
+			if(branchtype == 'hotfix'){
+				firstbranch="main"
+				secondbranch="develop"
+			}
+				echo "Branch Type::"+branchtype				
+				sh "git checkout "+firstbranch
+				echo "=============MERGE RESULT OF "+firstbranch.toUpperCase()+"============="
+				sh "git merge --no-ff origin/"+GIT_BRANCH
+				echo "==================================================="
+				sh "git add --all"
+				//sh "git rm -r --cached target"
+				sh "git status"
+				sh 'git commit --only --allow-empty -m "Code Merge in '+firstbranch+' from '+GIT_BRANCH+' branch"'
+				sh "git remote set-url origin https://github.com/{your-organization}/${APP_DIR}.git"
+				// sh "git push -u origin --all"
+				sh "git push https://{your-organization}:$GITHUB_TOKEN@github.com/{your-organization}/${APP_DIR}.git ${firstbranch}"
+
+				echo "##########NEXT MERGE PROCEED############"
+
+				
+				sh "git checkout "+secondbranch
+				echo "==========MERGE RESULT OF "+secondbranch.toUpperCase()+"=========="
+				sh "git merge --no-ff "+firstbranch
+				echo "==================================================="
+				sh "git add --all"
+				//sh "git rm -r --cached target"
+				sh "git status"
+				sh 'git commit --only --allow-empty -m "Code Merge in '+secondbranch+' from '+firstbranch+' branch"'
+				sh "git remote set-url origin https://github.com/{your-organization}/${APP_DIR}.git"
+				// sh "git push -u origin --all"
+                sh "git push https://{your-organization}:$GITHUB_TOKEN@github.com/{your-organization}/${APP_DIR}.git ${secondbranch}" 
+}
+
+def createTag(APP_DIR,tag){
+		
+		//def tag = 'v'+TAG_VERSION+'-'+ARTIFACT_BUILD_NUMBER
+		echo "Tag:: "+tag
+		sh 'git checkout main'
+		sh 'git tag '+tag
+		sh 'git tag'
+		sh "git remote set-url origin https://{your-organization}:\$GITHUB_TOKEN@github.com/{your-organization}/${APP_DIR}.git"
+		sh 'git push -u origin : '+tag
+        // sh "git push https://{your-organization}:$GITHUB_TOKEN@github.com/{your-organization}/${APP_DIR}.git v${tag}:main"
+}
+
+pipeline {
+    agent {
+        // label 'mule && java-8'
+	   label 'default'
+    }
+
+    environment {
+        GITHUB_TOKEN= credentials('github_token')
+        JFROG_TOKEN= credentials('jfrog_token')
+        // JENKINS_TOKEN=withCredentials([string(credentialsId: 'jenkins_token_av', variable: '')])
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script{
+                    def repoName = getRepoNameFromGitUrl(gitUrl)
+                    APP_DIR=repoName
+                    echo "BRANCH = ${GIT_BRANCH}"
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                // checkout scm
+                        checkout(
+                                scm: [$class: 'GitSCM',
+                                    branches: [[name: "refs/remotes/origin/${GIT_BRANCH}"]],
+                                    extensions: [],
+                                    userRemoteConfigs: [[url: gitUrl, credentialsId: 'mention your credentials ID']]
+                                ]
+                         )
+                        def props = readProperties  file:'properties.jenkins'
+                        application_name = props['application.name.prd']
+                    }
+                    def JAR_VERSION
+                    pom = readMavenPom file: "${env.WORKSPACE}/${APP_DIR}/${GIT_BRANCH}/pom.xml"
+                    POM_GROUP_ID = pom.groupId
+                    POM_ARTIFACT_ID = "${application_name}"
+                    POM_VERSION=pom.version
+                    artifact_package_delimit = ARTIFACT_PACKAGE.split('-')
+                    // JAR_NAME= artifact_package_delimit[0]
+                    JAR_VERSION = artifact_package_delimit[0]
+                    ARTIFACT_BUILD_NUMBER=artifact_package_delimit[2]
+                    println("POM ::: "+POM_GROUP_ID+" = "+POM_ARTIFACT_ID+" = "+ARTIFACT_PACKAGE)
+                    defineJob(pom.groupId,application_name,ARTIFACT_PACKAGE,APP_DIR,GIT_BRANCH)
+                    // TAGVERSION=JAR_VERSION.split('-')
+                    // TAG_VERSION=TAGVERSION[0]
+                    // echo "tag: ${TAG_VERSION}"
+                    def availableTag = FetchLatestTag(APP_DIR)
+                    def latestTag = ''
+                    availableTag.each { version ->
+                        def currentTag = version.name
+                        if (currentTag > latestTag || latestTag.isEmpty()) {
+                            latestTag = currentTag
+                        }
+                    }
+                    if (latestTag.isEmpty()) {
+                        echo "No versions found. This is a new repo."
+                    } else {
+                        echo "Latest Tag: ${latestTag}"
+                        echo "################################################################################################"
+                        echo "### Checking if the version deploy is higher than the version which is already deployed ###"
+                        echo "################################################################################################"
+                        def version1 = "${latestTag}"
+                        // version1 = version1.substring(1)
+                        def version2 = "${JAR_VERSION}.${ARTIFACT_BUILD_NUMBER}"
+                        echo "LatestTag: ${version1} :: ArtifactVersion: ${version2}"
+                        def result = compareVersions(version1, version2)
+                        echo "${result}"
+                    }
+                }
+                
+            }
+        }
+
+        stage('Check Code Conflict') {
+            steps {
+                script {
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                        def mainBranch = 'main'
+                        def devBranch = 'origin/develop'
+                        def featureBranch = "origin/${GIT_BRANCH}"
+                        echo "featureBranch: ${featureBranch}"
+                        def tempBranch = "temp-${GIT_BRANCH}" // Create a temporary branch name
+
+                        sh 'git config --global user.name "username"'
+                        sh 'git config --global user.email "mail@email.com"'
+                        // sh 'git config --list'
+                                             
+                        // Create and checkout a temporary branch for conflict check from feature branch
+                        sh "git checkout -b ${tempBranch} ${featureBranch}"
+                        
+                        // Fetch latest changes from remote branches
+                        // sh "git fetch origin ${mainBranch}:${mainBranch} ${devBranch}:${devBranch} ${featureBranch}:${featureBranch}"
+                        
+                        // Attempt to merge the feature branch into dev without committing
+                        def mergeOutput = sh(script: "git checkout ${devBranch} && git merge --no-commit ${tempBranch}", returnStdout: true)
+                        
+                        if (mergeOutput.contains("CONFLICT")) {
+                            echo "==================================================="
+																
+image = """
+   _                    _
+ _( )                  ( )_
+(_, |       __ __      | ,_)
+   \\'\\     /  ^  \\    /'/
+    '\\'\\,/\\       \\,/'/'
+       '\\| []   []  |/'
+         (_  /^\\  _)
+           \\  ~  /
+           /HHHHH\\
+         /'/{^^^}\\'\\
+     _,/'/'  ^^^   '\\'\\,_
+   (_,  |            |  ,_)
+      (_)            (_)  
+"""
+                            print(image)
+                            echo "##############################################################################"
+                            echo "####  Conflict has been found.Resolve the issue ASAP before deploying the code  ####"
+                            echo "##############################################################################"
+                            currentBuild.result = 'FAILURE'
+                            error "Code conflicts detected. Aborting deployment."
+                        } else {
+                            echo "No code conflicts found. Proceeding with deployment."
+                            sh "git branch -D ${tempBranch}" // Delete the temporary branch
+                            sh "git reset --hard ${devBranch}"
+                            sh "git checkout ${featureBranch}" // Switch back to the feature branch
+
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Dowload Artifact') {
+            steps {
+              script{
+                dir("${APP_DIR}/${GIT_BRANCH}"){
+                    echo "#########################################################################################"
+                    echo "####  Downloading Artifact for ${application_name} version ${ARTIFACT_PACKAGE} ####"
+                    echo "#########################################################################################"
+                    pom = readMavenPom file: "${env.WORKSPACE}/${APP_DIR}/${GIT_BRANCH}/pom.xml"
+                    POM_GROUP_ID = pom.groupId
+                    group_id = POM_GROUP_ID.replace('.', '/')
+                    ARTIFACT_FILENAME = "${application_name}-${ARTIFACT_PACKAGE}-mule-application.jar"
+		    if(!fileExists('target')){
+                        echo "Creating target folder......"
+                        sh 'mkdir target'
+                    }else {
+                        echo 'Target folder already exists.'
+                    }
+                    // sh 'mkdir target'
+                    def auth = """
+                            curl -H "Authorization: Bearer ${JFROG_TOKEN}" -k -w "%{http_code}" -X GET "https://{your-artifactory-url}/artifactory/{your-repository}/${group_id}/${application_name}/${ARTIFACT_PACKAGE}/${ARTIFACT_FILENAME}?skipUpdateStats=true" -o target/${ARTIFACT_FILENAME}
+
+                            """
+                    def is_package_exists = sh(script: auth, returnStdout: true)
+
+                    if(is_package_exists == "200"){
+                        echo "File Download Successfully"
+					    // IS_JFROG_PACKAGE_EXISTS = true
+					}else{
+                    error "File Not Found Aborting the further stages...."
+					}
+
+                }
+              }
+            }
+        }
+
+        stage('Promotion to Prod'){
+            steps{
+                script{
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                        echo "Promotion to Prod"
+                        try {
+								// notifyApproval("Production")
+								def props = readProperties  file:'properties.jenkins'
+								application_name = props['application.name.prd']
+								timeout(time: 60, unit: 'HOURS') {
+									userInput = input(
+										id: 'Launch', message: 'Approval Required', submitter: approver, parameters: [
+											booleanParam(defaultValue: false, description: '', name: "Promote '"+application_name+"' application to CloudHub Production Environment?\n(Expiration: 15 SECONDS)")
+										]
+									)
+								}
+							} catch (err) { // timeout reached or not approved
+								userInput = false
+								//throw err
+								echo "Aborted ..."
+								error 'No Approval to Production'
+							}
+							if (userInput == true) {
+                                echo "Deploy into Production Environment"
+
+                            }else{
+								echo "Promotion to Production Environment Aborted...."
+								error 'Promotion to Production Environment Aborted....'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deployment to Prod'){
+            steps{
+                script{
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                        configFileProvider([configFile(fileId: 'your-file-id', variable: 'mvn_settings')]) {
+                            withCredentials([string(credentialsId: 'anypoint_platform_clientID_prod', variable: 'client_id'), string(credentialsId: 'anypoint_platform_clientSecret_prod', variable: 'client_secret'), string(credentialsId: 'anypoint_connect_client_ID', variable: 'connect_client_id'), string(credentialsId: 'anypoint_connect_client_secret', variable: 'connect_client_secret'), string(credentialsId: 'mulesoft-runtime-key-prod', variable: 'runtimekey_prod')]){
+                                def props = readProperties  file:'properties.jenkins'
+                                application_name = props['application.name.prd']
+                                workers_type = props['workers.type.prd']
+                                workers = props['workers.prd']
+                                mule_version = props['mule.version.prd']
+                                echo "#########################################################################################"
+                                echo "####  Starting Deployment for ${application_name} version ${ARTIFACT_PACKAGE} to ${deployment_target} ####"
+                                echo "#########################################################################################"
+                                if (userInput == true && deployment_target == "CloudHub"){
+                                    echo "deployment to Cloudhub Prod"
+                                    sh "mvn mule:deploy -s ${mvn_settings} -B -U -e -V -DskipTests -DmuleDeploy -DskipMunitTests -Denvironment=Production -DmuleEnv=prod -DartifactID=${application_name} -Druntimekey='${runtimekey_prod}' -Dmule.artifact=target/${application_name}-${ARTIFACT_PACKAGE}-mule-application.jar -Dconnect_clientid=${connect_client_id} -Dconnect_clientsecret=${connect_client_secret} -DbuildNumber=${ARTIFACT_BUILD_NUMBER} -Dclientid=${client_id} -Dworkers=${workers} -Dworkers_type=${workers_type} -Dclientsecret=${client_secret}"
+
+                                }else if (userInput == true && deployment_target == "Hybrid"){
+                                    echo "deployment to Hybrid Prod"
+                                    sh "mvn mule:deploy -s ${mvn_settings} -B -U -e -V -DskipTests -DmuleDeploy -Phybrid -DskipMunitTests -Denvironment=Production -DmuleEnv=prod -DartifactID=${application_name} -Druntimekey='${runtimekey_prod}' -Dmule.artifact=target/${application_target}-${POM_VERSION}-mule-application.jar -Dconnect_clientid=${connect_client_id} -Dconnect_clientsecret=${connect_client_secret} -DbuildNumber=${ARTIFACT_BUILD_NUMBER} -Dclientid=${client_id} -Dclientsecret=${client_secret}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // stage('Sending Email Notification'){
+        //     steps{
+        //         script{
+        //             dir("${APP_DIR}/${GIT_BRANCH}"){
+        //                 echo "Sending Email Notification for deploymentStatus"
+        //                 // if (deploymentStatus == "Deployment successful") {
+        //                 //     // Send an email for successful deployment
+        //                 //     // You should replace this with your actual email sending logic
+        //                 //     echo "Sending email: Deployment is done successfully"
+        //                 // } else {
+        //                 //     // Send an email for failed deployment
+        //                 //     // You should replace this with your actual email sending logic
+        //                 //     echo "Sending email: Deployment is not done"
+        //                 // }
+        //             }
+        //         }
+        //     }
+        // }
+
+        stage('Promotion to Post Production'){
+            steps{
+                script{
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                        
+                        try {
+                            // notifyApproval("Post-Production")
+                            timeout(time: 72, unit: 'HOURS') {
+                                userInput = input(
+                                    id: 'Launch', message: 'Approval Required', submitter: approver, parameters: [
+                                        booleanParam(defaultValue: false, description: '', name: "Promote application to perform merge in Develop and Master Branch?\n(Expiration: 15 SECONDS)")
+                                    ]
+                                )
+                            }
+                        } catch (err) { // timeout reached or not approved
+                            userInput = false
+                            //throw err
+                            echo "Aborted ..."
+                            stage('No Approval to Post-Production Actions')
+                            def abortInput=''
+                            try {
+                                //notifyApproval("Test")
+                                timeout(time: 30, unit: 'MINUTES') {
+                                    abortInput = input(
+                                        id: 'Launch', message: 'Input Required', parameters: [
+                                            choice(description: 'Provide the Reason to Abort the Stage', name: "Abort_Reason_List", choices:'Select\nTo Increase the effeciency of Jenkins\nDue to multiple thread consupmtions\nPost Production Timeout Reached\nOther')
+                                        ]
+                                    )
+                                print("abortInput::"+abortInput)
+                                }
+                            }catch (errabort) { // timeout reached or not approved
+                                echo "Aborted ..."
+                                abortInput= "Timeout reached before the reason to abort Post Production could be provided"
+                                BUILD_STATUS="SUCCESS"
+                                POST_DEPLOYMENT_REASON= abortInput
+                                currentBuild.result='SUCCESS'
+                            }
+                            print("AbortInput::"+abortInput)
+                            if(abortInput == "Other"){
+                                
+                                try {
+                                
+                                    timeout(time: 30, unit: 'MINUTES') {
+                                        abortInput = input(
+                                            id: 'abortInput', message: 'Provide the reason to abort', parameters: [
+                                                [$class: 'TextParameterDefinition', defaultValue: 'No Reason provided to abort', name: 'Reason']
+                                            ]
+                                        )
+				      print("abortInput Reason::"+abortInput)
+                                    }
+                                }catch (errotherabort) { // timeout reached or not approved
+                                    echo "Timeout reached or not approved."
+                                    abortInput="Timeout reached before the reason to abort Post Production could be provided"
+                                    
+                                }
+                                BUILD_STATUS="FAILURE"
+                                POST_DEPLOYMENT_REASON= abortInput
+                                currentBuild.result='FAILURE'
+                                // addBadge icon: 'error.gif', id: 'post_prod_abort', link: '', text: 'Reason :'+abortInput
+                                
+                            }else{
+                                BUILD_STATUS="SUCCESS"
+                                POST_DEPLOYMENT_REASON= abortInput
+                                currentBuild.result='SUCCESS'
+                                // addBadge icon: 'star.gif', id: 'post_prod_abort', link: '', text: 'Reason :'+abortInput
+                            }
+        
+                        }
+                    
+                        if (userInput == true) {
+                            stage('Merge Process into Develop and Master Branch') {
+                                
+                                echo "Deleting the target folder"
+                                dir("${APP_DIR}/${GIT_BRANCH}/target"){
+                                    deleteDir()
+                                }
+                                print("Branch::"+GIT_BRANCH)
+                                branchtype=GIT_BRANCH.split('/')
+                                print("Branch Type:"+branchtype[0])
+                                try{
+                                    echo "Starting the Merge Process"
+                                    mergeExecution(branchtype[0],GIT_BRANCH,APP_DIR)
+                                    echo "Merge Process Completed........."
+                                    echo "Creating a tag"
+                                    def JAR_VERSION
+                                    artifact_package_delimit = ARTIFACT_PACKAGE.split('-')
+                                    JAR_VERSION = artifact_package_delimit[0]
+                                    ARTIFACT_BUILD_NUMBER=artifact_package_delimit[2]
+                                    // ARTIFACT_BUILD_NUMBER=TAGVERSION[2]
+                                    def tag=JAR_VERSION+"."+ARTIFACT_BUILD_NUMBER
+                                    // def tag="1.0.7"
+                                    createTag(APP_DIR,tag)
+                                    echo "Tag created.............."
+                                    def allsuccess="The Deployment and Post Production was Succesfully Completed"
+                                    // addBadge icon: 'star-gold.gif', id: 'sucess', link: 'null', text: allsuccess
+                                    BUILD_STATUS="SUCCESS"
+                                    POST_DEPLOYMENT_REASON= allsuccess
+                                    currentBuild.result = 'SUCCESS'
+                                }catch(err){
+                                echo "==================================================="
+																
+image = """
+   _                    _
+ _( )                  ( )_
+(_, |       __ __      | ,_)
+   \\'\\     /  ^  \\    /'/
+    '\\'\\,/\\       \\,/'/'
+       '\\| []   []  |/'
+         (_  /^\\  _)
+           \\  ~  /
+           /HHHHH\\
+         /'/{^^^}\\'\\
+     _,/'/'  ^^^   '\\'\\,_
+   (_,  |            |  ,_)
+      (_)            (_)  
+"""
+										print(image)
+										echo "##############################################################################"
+										echo "####Conflict has been found.Resolve the issue ASAP before merging the code####"
+										echo "##############################################################################"
+										
+										def postProdFailMgs='The Deployment was Successfull but Post Production Failed'
+										// addBadge icon: 'warning.gif', id: 'post_prod_fail', link: 'null', text: postProdFailMgs
+										BUILD_STATUS="SUCCESS"
+										POST_DEPLOYMENT_REASON= postProdFailMgs
+										currentBuild.result = 'SUCCESS'
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    post {
+        always {
+            cleanWs() // Clean up workspace after the pipeline
+        }
+    }
+}
