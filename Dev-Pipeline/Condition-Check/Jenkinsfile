@@ -1,0 +1,160 @@
+import groovy.json.JsonSlurper
+def processedCommits = []
+
+pipeline {
+    agent {
+        //label 'mule && java-8'
+        label 'default'
+
+    }
+
+    stages {
+        stage('Execute Bash Script') {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'github_token', variable: 'GITHUB_TOKEN')]) {
+                        def workspaceDir = "${env.WORKSPACE}/DevOps"
+                        echo "${workspaceDir}"
+
+
+                        // def REPO_NAMES = ["demo_test2", "demo_test"]
+                        def REPO_NAMES = readFile("${env.WORKSPACE}/Dev-Pipeline/Condition/repository_names.txt").trim().split('\n')
+                        for (def repo in REPO_NAMES) {
+                            echo "${repo}"
+                            def giturl = "https://github.com/your-organization/${repo}"
+                            dir("${env.WORKSPACE}") {
+                                sh 'git fetch https://your-organization:$GITHUB_TOKEN@github.com/your-organization/your-devops-repository.git main'
+                                sh 'git pull https://your-organization:$GITHUB_TOKEN@github.com/your-organization/your-devops-repository.git main'
+                            }
+                            // sh "git fetch https://your-organization:${GITHUB_TOKEN}@github.com/your-organization/your-devops-repository.git main"
+                            dir("${workspaceDir}/${repo}"){
+                                checkout(
+                                            scm: [$class: 'GitSCM',
+                                                branches: [[name: "refs/remotes/origin/main"]],
+                                                extensions: [],
+                                                userRemoteConfigs: [[url: giturl, credentialsId: 'mention your credentials ID']] // to find credential ID go to Manage Jenkins> Credentials, Find the credentials you have saved
+                                            ]
+                                        )
+                                sh "git branch -a"
+                                def branchNames = sh(
+                                    script: 'git branch -r | grep -v "HEAD" | sed -e "s#^\\s*origin/##"',
+                                    returnStdout: true
+                                ).trim().split('\n')
+
+                                echo "Branches are: ${branchNames}"
+                                def processedCommitsFile = "${env.WORKSPACE}/Dev-Pipeline/Condition/processed_commits.txt"
+                                
+
+                                if (fileExists(processedCommitsFile)) {
+                                    processedCommits = readFile(file: processedCommitsFile).readLines()
+                                }
+
+                                for (def branchName in branchNames) {
+                                    if (branchName != 'main' && branchName != 'develop') {
+                                        dir("${env.WORKSPACE}") {
+                                            sh 'git fetch https://your-organization:$GITHUB_TOKEN@github.com/your-organization/your-devops-repository.git main'
+                                            sh 'git pull https://your-organization:$GITHUB_TOKEN@github.com/your-organization/your-devops-repository.git main'
+                                        }
+                                        sh "git checkout ${branchName}"
+                                        def commitMessageCommand = """
+                                            curl -s -H 'Authorization: token $GITHUB_TOKEN' \\
+                                            "https://api.github.com/repos/your-organization/${repo}/commits/${branchName}" | \\
+                                            grep -oE '"message": ".*"' | cut -d '"' -f 4
+                                        """
+                                        def commitMessage = sh(
+                                            script: commitMessageCommand,
+                                            returnStdout: true
+                                        ).trim()
+
+                                        def commitIdCommand = """
+                                            curl -s -H 'Authorization: token $GITHUB_TOKEN' \\
+                                            "https://api.github.com/repos/your-organization/${repo}/commits/${branchName}?timestamp=${new Date().getTime()}" |
+                                            grep -o -m 1 '"sha": "[^"]*' | cut -d '"' -f 4
+                                        """
+                                        def commitId = sh(
+                                            script: commitIdCommand,
+                                            returnStdout: true
+                                        ).trim()
+                                        echo "Commit Message: ${commitMessage}"
+                                        echo "Branch Name: ${branchName}"
+
+                                        if (commitMessage.contains("Build:") && !processedCommits.contains(commitId)) {
+                                            echo "Repository: ${repo}"
+                                            echo "Branch: ${branchName}"
+                                            echo "Last Commit: ${commitMessage}"
+                                            echo "Commit ID: ${commitId}"
+
+                                            
+                                            // Mark commit ID as processed
+                                            processedCommits.add(commitId)
+                                            writeFile file: processedCommitsFile, text: processedCommits.join('\n')
+                                            dir("${env.WORKSPACE}") {
+                                                // Commit and push the changes to the current repository
+                                                sh 'git config --global user.name "user_name"'
+                                                sh 'git config --global user.email "email_id"'
+                                                sh 'git config --list'
+                                                sh "git checkout main"
+                                                sh "git add ${env.WORKSPACE}/Dev-Pipeline/Condition/processed_commits.txt"
+                                                sh "git branch"
+                                                sh 'git status'
+                                                sh "git remote -v"
+                                                sh "git remote set-url origin https://github.com/your-organization/your-devops-repository.git"
+                                                sh "git commit -m 'Update processed commits'"
+                                                sh 'git fetch https://your-organization:$GITHUB_TOKEN@github.com/your-organization/your-devops-repository.git main'
+                                                sh 'git pull https://your-organization:$GITHUB_TOKEN@github.com/your-organization/your-devops-repository.git main'
+                                                sh 'git push https://your-organization:$GITHUB_TOKEN@github.com/your-organization/your-devops-repository.git main'
+                                            }
+
+                                            try {
+                                                // Trigger Dev Pipeline
+                                                build job: 'Mulesoft-Dev', parameters: [
+                                                    string(name: 'GIT_URL', value: "https://github.com/your-organization/${repo}.git"),
+                                                    string(name: 'GIT_BRANCH', value: "${branchName}")
+                                                ]
+                                                echo "Triggered another pipeline for branch ${branchName}"
+                                            } catch (Exception e) {
+                                                echo "Failed to trigger Mulesoft-Dev Pipeline for branch ${branchName}: ${e.message}"
+                                                // You can perform additional error handling here if needed
+                                            }
+
+                                            echo "Triggered another pipeline for branch ${branchName}"
+                                        
+                                            }else {
+                                                if (processedCommits.contains(commitId)) {
+                                                    echo "Commit ${commitId} already processed, skipping pipeline trigger"
+                                                } else {
+                                                    echo "Commit ${commitId} does not meet 'Build:' condition, skipping pipeline trigger"
+                                                }
+                                            }
+                                    }
+
+                                }
+                                env.PROCESSED_COMMITS = processedCommits.join('\n')
+                                // echo "Processed Commits:\n${env.PROCESSED_COMMITS}"                             
+                            }
+                        }
+
+                }
+                        
+            }
+        }
+    }
+    
+    }
+
+    
+
+    post {
+        always {
+            echo "Pipeline completed. Result: ${currentBuild.result}"
+            cleanWs()
+        }
+        success {
+            echo "Pipeline completed successfully"
+        }
+        failure {
+            echo "Pipeline completed with failures"
+        }
+    }
+
+}
