@@ -1,0 +1,474 @@
+#!groovy
+import groovy.json.JsonSlurper
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+
+def emailRecipients = 'email@mail.com'
+def APP_DIR = ''
+def gitUrl = "${params.GIT_URL}"
+def GIT_BRANCH = "${params.GIT_BRANCH}"
+def POM_GROUP_ID = ''
+def POM_ARTIFACT_ID = ''
+def POM_VERSION
+def artifact_package = ''
+def ARTIFACT_BUILD_NO = 0
+def application_name = ''
+def application_prod_name = ''
+
+def defineJob(GROUP_ID,application_name,POM_VERSION,APP_DIR,GIT_BRANCH){
+	
+	currentBuild.displayName = application_name+"#"+POM_VERSION
+	currentBuild.description = APP_DIR+"/"+GIT_BRANCH+"/"+GROUP_ID+"/"+application_name
+}
+
+
+def getRepoNameFromGitUrl(gitUrl) {
+    def parts = gitUrl.split('/')
+    if (parts.size() >= 2) {
+        // return parts[-2] + "/" + parts[-1].replaceAll("\\.git\$", "")
+        return parts[-1].replaceAll("\\.git\$", "")
+    }
+    return null
+}
+
+// If you want to fetch latest version from Github Package
+// def fetchAndDisplayPackageVersions(POM_GROUP_ID,application_prod_name) {
+//     try {
+//         def curlCommand = """
+//             curl -u your-organization:${GITHUB_TOKEN} \
+//             -H "Accept: application/vnd.github.v3+json" \
+//             "https://api.github.com/users/your-organization/packages/maven/${POM_GROUP_ID}.${application_prod_name}/versions"
+//         """
+//         def response = sh(script: curlCommand, returnStdout: true).trim()
+
+//         if (response) {
+//             def versions = readJSON text: response
+//             if (versions) {
+//                 // echo "Available versions of Github Package:"
+//                 versions.each { version ->
+//                     // echo version.name // Display the 'name' field
+//                     version.name
+//                 }
+//             } else {
+//                 error("No versions found for Github Package.")
+//             }
+//         } else {
+//             error("Failed to fetch package versions.")
+//         }
+//     } catch (Exception e) {
+//         // error("An error occurred: ${e.getMessage()}")
+//         ARTIFACT_BUILD_NO = 1
+// 		print("ARTIFACT_BUILD_NO::: "+ARTIFACT_BUILD_NO)
+//     }
+// }
+
+
+//If you want to fetch latest version from Jfrog Repository
+def fetchAndDisplayPackageVersions(POM_VERSION,application_prod_name,POM_GROUP_ID) {
+    try {
+        POM_GROUP_ID = pom.groupId
+        POM_VERSION= pom.version
+        group_id = POM_GROUP_ID.replace('.', '/')
+        def auth = """                       
+        curl -H "Authorization: Bearer ${JFROG_TOKEN}" -k -X GET "https://{your-artifactory-url}/artifactory/{repository-name}/${group_id}/${application_prod_name}/" 
+
+        """
+        // sh auth
+        
+        def html = sh(script: auth, returnStdout: true).trim()
+
+        def pattern = /<a href="([^"]+)">([^<]+)<\/a>\s+(\d{2}-\w{3}-\d{4} \d{2}:\d{2})/
+
+    
+        def folders = (html =~ pattern).collect { match ->
+            def folderName = match[1]
+            def lastModified = match[3]
+
+            // Parse the last modified date to compare
+            def dateFormat = new SimpleDateFormat("dd-MMM-yyyy HH:mm")
+            def lastModifiedDate = dateFormat.parse(lastModified)
+
+            [folderName, lastModifiedDate]
+        }
+
+        def folderNames = []
+
+        folders.each { folderEntry ->
+            def folderName = folderEntry[0].substring(0, folderEntry[0].indexOf('/'))
+            folderNames.add(folderName)
+        }
+
+        // Extract the major version from the pom version
+        def pomMajorVersion = POM_VERSION.replaceAll(/-SNAPSHOT-.*/, '').replaceAll(/\$\{buildNumber\}/, '')
+        echo "pom version: ${pomMajorVersion}"
+
+        def FolderMajorVersion = folderNames.collect { name ->
+            def parts = name.split('-SNAPSHOT-')
+            "${parts[0]}"
+        }
+        // echo "Sort: ${uniqueMajorVersion}"
+        def uniqueMajorVersions = FolderMajorVersion.unique()
+
+
+        // Check if pomMajorVersion is in uniqueMajorVersions
+        if (!uniqueMajorVersions.any { it.startsWith(pomMajorVersion) }) {
+            echo "POM Major Version not found in Available Versions. Setting buildNumber to 1."
+            return POM_VERSION
+        } else {
+            // Filter available versions to match the major version
+            def matchingVersions = folderNames.findAll { it.startsWith(pomMajorVersion) }
+            println matchingVersions
+
+            // Find the maximum value after '-SNAPSHOT-' among matching versions
+            def maxVersion = matchingVersions.collect { it.replaceAll(/.*-SNAPSHOT-(\d+)$/, '$1') }.max { it.toInteger() }
+            println maxVersion
+
+            // Create a list of unique major versions from the availableVersions
+            // def uniqueMajorVersions = folderNames.collect { it.replaceAll(/-SNAPSHOT-(\d+)$/, '') }.unique()
+            
+            def maxuniqueMajorVersions = uniqueMajorVersions.max { version ->
+                def parts = version.tokenize('.').collect { it as Integer }
+                parts.join('.')
+            }
+
+            if (maxuniqueMajorVersions == null) {
+                maxuniqueMajorVersions = uniqueMajorVersions.first()
+            }
+        
+
+            println "Maximum Unique Major Version: ${maxuniqueMajorVersions}"
+
+            // Check if pomMajorVersion and maxVersion are both greater than or equal to
+            if (pomMajorVersion >= maxuniqueMajorVersions) {
+                echo "POM Major Version: ${pomMajorVersion}"
+                echo "Matching Versions: ${matchingVersions}"
+                echo "Maximum Version: ${pomMajorVersion}-SNAPSHOT-${maxVersion}"
+                POM_VERSION = "${pomMajorVersion}-SNAPSHOT-${maxVersion}"
+                println POM_VERSION
+                echo "Unique Major Versions: ${uniqueMajorVersions}"
+                return POM_VERSION
+            } else {
+                error "POM Major Version (${pomMajorVersion}) is less than the Maximum Version (${maxuniqueMajorVersions}). Pipeline failed."
+                }
+            }
+                
+    } catch (Exception e) {
+        error("An error occurred: ${e.getMessage()}")
+        ARTIFACT_BUILD_NO = 1
+		print("ARTIFACT_BUILD_NO::: "+ARTIFACT_BUILD_NO)
+        
+        
+    }
+}
+
+pipeline {
+    agent {
+	label 'default'
+        
+    }
+
+    environment {
+        GITHUB_TOKEN= credentials('github_token')
+        JFROG_TOKEN= credentials('jfrog_token')
+    }
+
+    stages {
+        stage('Version Validation and Checkout') {
+            steps {
+                script{
+                    def repoName = getRepoNameFromGitUrl(gitUrl)
+                    APP_DIR=repoName
+                    echo "BRANCH = ${GIT_BRANCH}"
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                // checkout scm
+                        checkout(
+                                scm: [$class: 'GitSCM',
+                                    branches: [[name: "refs/remotes/origin/${GIT_BRANCH}"]],
+                                    extensions: [],
+                                    userRemoteConfigs: [[url: gitUrl, credentialsId: 'mention your credentials ID']]
+                                ]
+                         )
+                    def props = readProperties  file:'properties.jenkins'
+                    application_name = props['application.name.dev']
+                    application_prod_name = props['application.name.prd']
+                    }
+                    pom = readMavenPom file: "${env.WORKSPACE}/${APP_DIR}/${GIT_BRANCH}/pom.xml"
+                    POM_GROUP_ID = pom.groupId
+                    POM_ARTIFACT_ID = pom.artifactId
+                    POM_VERSION=pom.version
+                    def availableVersions = fetchAndDisplayPackageVersions(POM_VERSION,application_prod_name,POM_GROUP_ID)
+                    // def latestVersion = ''
+                    // availableVersions.each { version ->
+                    //     def currentItemVersion = version.name
+                    //     if (currentItemVersion > latestVersion || latestVersion.isEmpty()) {
+                    //         latestVersion = currentItemVersion
+                    //     }
+                    // }
+                    // echo "Latest Package Version: ${latestVersion}"
+                    if (availableVersions != 0) {
+                        artifact_package = availableVersions
+                        artifact_package_Delimit = artifact_package.split('-')
+                        artifact_build = artifact_package_Delimit[artifact_package_Delimit.length - 1]
+                        if (artifact_build.isNumber()) {
+                            print("artifact_build::: " + (artifact_build.toInteger() + 1))
+                            def incrementedValue = (artifact_build.toInteger() + 1).toString()
+
+                            def pom_version_with_buildnumber = "${POM_VERSION}"
+                            pom_version_delimit = pom_version_with_buildnumber.split('-')
+                            versionWithoutBuildNumber = pom_version_delimit[0..1].join('-')
+                            echo "package:: ${versionWithoutBuildNumber}"
+
+
+                            // Update the artifact_package with the new value
+                            POM_VERSION = "${versionWithoutBuildNumber}-${incrementedValue}"
+                            
+                            // print("artifact_build::: " + incrementedValue)
+                            print("artifact_package:: ${POM_VERSION}")
+                            ARTIFACT_BUILD_NO = incrementedValue
+                            // ARTIFACT_BUILD_NO = artifact_build.toInteger() + 1
+                            
+                            // print("ARTIFACT_BUILD_NO::: " + ARTIFACT_BUILD_NO)
+                        } else {
+                            print("Artifact Version is not a Valid Number")
+                            // Check if artifact_version and POM_VERSION are the same
+                            // if (artifact_version == POM_VERSION) {
+                            //     ARTIFACT_BUILD_NO++
+                            // } else {
+                            //     ARTIFACT_BUILD_NO = 1
+                            // }
+                            ARTIFACT_BUILD_NO++
+
+                            def pom_version_with_buildnumber = "${POM_VERSION}"
+                            // echo "Current Package Version: ${pom_version_with_buildnumber}"
+                            pom_version_delimit = pom_version_with_buildnumber.split('-')
+                            versionWithoutBuildNumber = pom_version_delimit[0..1].join('-')
+                            
+                            echo "Current Package Version: ${versionWithoutBuildNumber}"
+                            POM_VERSION = "${versionWithoutBuildNumber}-${ARTIFACT_BUILD_NO}"
+            
+
+                            // Create the new artifact package with the incremented build number
+                            print("Updated Package Version: " + POM_VERSION)
+
+                            // Increment ARTIFACT_BUILD_NO for the next iteration
+
+                        }
+                    }else {
+                        // If no href values were found, set ARTIFACT_BUILD_NO to 1
+                        ARTIFACT_BUILD_NO++
+
+                        def pom_version_with_buildnumber = "${POM_VERSION}"
+                        echo "packagewithBuildNumber: ${pom_version_with_buildnumber}"
+                        pom_version_delimit = pom_version_with_buildnumber.split('-')
+                        versionWithoutBuildNumber = pom_version_delimit[0..1].join('-')
+                        
+                        echo "package:: ${versionWithoutBuildNumber}"
+                        POM_VERSION = "${versionWithoutBuildNumber}-${ARTIFACT_BUILD_NO}"
+        
+
+                        // Create the new artifact package with the incremented build number
+                        print("artifact_package::: " + POM_VERSION)
+                    }
+                    println("POM ::: "+POM_GROUP_ID+" = "+application_prod_name+" = "+POM_VERSION)
+                    defineJob(pom.groupId,application_name,POM_VERSION,APP_DIR,GIT_BRANCH)
+
+                }
+            }
+        }
+
+        stage('Check Code Conflict') {
+            steps {
+                script {
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                        def mainBranch = 'main'
+                        def devBranch = 'origin/develop'
+                        def featureBranch = "origin/${GIT_BRANCH}"
+                        echo "featureBranch: ${featureBranch}"
+                        def tempBranch = "temp-${GIT_BRANCH}" // Create a temporary branch name
+
+                        sh 'git config --global user.name "username"'
+                        sh 'git config --global user.email "email@mail.com"'
+                        // sh 'git config --list'
+                                             
+                        // Create and checkout a temporary branch for conflict check from feature branch
+                        sh "git checkout -b ${tempBranch} ${featureBranch}"
+                        
+                        // Fetch latest changes from remote branches
+                        // sh "git fetch origin ${mainBranch}:${mainBranch} ${devBranch}:${devBranch} ${featureBranch}:${featureBranch}"
+                        
+                        // Attempt to merge the feature branch into dev without committing
+                        def mergeOutput = sh(script: "git checkout ${devBranch} && git merge --no-commit ${tempBranch}", returnStdout: true)
+                        
+                        if (mergeOutput.contains("CONFLICT")) {
+                            echo "==================================================="
+																
+image = """
+   _                    _
+ _( )                  ( )_
+(_, |       __ __      | ,_)
+   \\'\\     /  ^  \\    /'/
+    '\\'\\,/\\       \\,/'/'
+       '\\| []   []  |/'
+         (_  /^\\  _)
+           \\  ~  /
+           /HHHHH\\
+         /'/{^^^}\\'\\
+     _,/'/'  ^^^   '\\'\\,_
+   (_,  |            |  ,_)
+      (_)            (_)  
+"""
+                            print(image)
+                            echo "##############################################################################"
+                            echo "####  Conflict has been found.Resolve the issue ASAP before deploying the code  ####"
+                            echo "##############################################################################"
+                            currentBuild.result = 'FAILURE'
+                            error "Code conflicts detected. Aborting deployment."
+                        } else {
+                            echo "No code conflicts found. Proceeding with deployment."
+                            sh "git branch -D ${tempBranch}" // Delete the temporary branch
+                            sh "git reset --hard ${devBranch}"
+                            sh "git checkout ${featureBranch}" // Switch back to the feature branch
+
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script{
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                        configFileProvider([configFile(fileId: 'your-file-id', variable: 'mvn_settings')]) {
+                            withCredentials([string(credentialsId: 'anypoint_platform_clientID_dev', variable: 'client_id'), string(credentialsId: 'anypoint_platform_clientSecret_dev', variable: 'client_secret'), string(credentialsId: 'anypoint_connect_clientID', variable: 'connect_client_id'), string(credentialsId: 'anypoint_connect_clientsecret', variable: 'connect_client_secret'), string(credentialsId: 'mulesoft-runtime-key-nonprod', variable: 'runtimekey_nonprod')]){
+                                def props = readProperties  file:'properties.jenkins'
+                                application_name = props['application.name.dev']
+                                application_prod_name = props['application.name.prd']
+                                workers_type = props['workers.type.dev']
+                                workers = props['workers.dev']
+                                mule_version = props['mule.version.dev']
+                                echo "application name: ${application_name}"
+                                echo "workers type: ${workers_type}"
+                                echo "workers: ${workers}"
+                                echo "mule version: ${mule_version}"
+                                // echo "ARTIFACT_BUILD_NO: ${ARTIFACT_BUILD_NO}"
+                                echo "ARTIFACT PACKAGE: ${POM_VERSION}"
+                                def deployenv
+                                echo "##############################################################################"
+                                echo "####  Starting Build Process for ${application_prod_name} version ${POM_VERSION}  ####"
+                                echo "##############################################################################"
+                                // sh "mvn -s ${mvn_settings} -B -U -e -V clean -DskipTests -DskipMunitTests package"
+                                //        -DclientId=${CLIENT_ID} -DclientSecret=${CLIENT_SECRET} -DcloudhubClientID=${ANYPOINT_CLIENT_ID} -DcloudhubClientSecret=${ANYPOINT_CLIENT_SECRET} -DruntimeKey=${RUNTIME_KEY_NONPROD}"
+                                sh "mvn -s ${mvn_settings} -B -U -e -V clean -DskipTests -DskipMunitTests package -DattachMuleSources -Druntimekey='${runtimekey_nonprod}' -Denvironment=Dev -DmuleEnv=dev -DartifactID=${application_prod_name} -Dconnect_clientid=${connect_client_id} -Dconnect_clientsecret=${connect_client_secret} -DbuildNumber=${ARTIFACT_BUILD_NO} -Dclientid=${client_id} -Dworkers=${workers} -Dworkers_type=${workers_type} -Dclientsecret=${client_secret}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // stage('Test') {
+    //   steps {
+    //     dir("${APP_DIR}/${GIT_BRANCH}"){
+    //       sh "mvn test \
+    //                -Denvironment=Dev \
+    //                 -Dclient.id=${CLIENT_ID} \
+    //                 -Dclient.secret=${CLIENT_SECRET} \
+                    //    -DbuildNumber=${ARTIFACT_BUILD_NO}"
+    //         }
+    //     }
+    // }
+
+        stage('Deploy Development') {
+            steps {
+                script{
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                        configFileProvider([configFile(fileId: 'your-file-id', variable: 'mvn_settings')]) {
+                            withCredentials([string(credentialsId: 'anypoint_platform_clientID_dev', variable: 'client_id'), string(credentialsId: 'anypoint_platform_clientSecret_dev', variable: 'client_secret'), string(credentialsId: 'anypoint_connect_clientID', variable: 'connect_client_id'), string(credentialsId: 'anypoint_connect_clientsecret', variable: 'connect_client_secret'), string(credentialsId: 'mulesoft-runtime-key-nonprod', variable: 'runtimekey_nonprod')]){
+                                def props = readProperties  file:'properties.jenkins'
+                                application_name = props['application.name.dev']
+                                application_prod_name = props['application.name.prd']
+                                workers_type = props['workers.type.dev']
+                                workers = props['workers.dev']
+                                mule_version = props['mule.version.dev']
+                                echo "application name: ${application_name}"
+                                echo "workers type: ${workers_type}"
+                                echo "workers: ${workers}"
+                                echo "mule version: ${mule_version}"
+                                echo "#########################################################################################"
+                                echo "####  Starting Deployment for ${application_name} version ${POM_VERSION} to CloudHub  ####"
+                                echo "#########################################################################################" 
+                                // sh "mvn -s ${mvn_settings} -B -U -e -V clean -DskipTests -DmuleDeploy -DskipMunitTests deploy"
+                                sh "mvn mule:deploy -s ${mvn_settings} -B -U -e -V -DskipTests -DmuleDeploy -DskipMunitTests -Denvironment=Dev -DmuleEnv=dev -DartifactID=${application_name} -Druntimekey='${runtimekey_nonprod}' -Dmule.artifact=target/${application_prod_name}-${POM_VERSION}-mule-application.jar -Dconnect_clientid=${connect_client_id} -Dconnect_clientsecret=${connect_client_secret} -DbuildNumber=${ARTIFACT_BUILD_NO} -Dclientid=${client_id} -Dworkers=${workers} -Dworkers_type=${workers_type} -Dclientsecret=${client_secret}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    
+    
+        stage('Publish to Jfrog Artifactory') {
+            steps {
+                dir("${APP_DIR}/${GIT_BRANCH}"){
+                    script {
+                        def PATH_TO_JAR = "${env.WORKSPACE}/${APP_DIR}/${GIT_BRANCH}/target/"  // Update with the actual path
+                        pom = readMavenPom file: "${env.WORKSPACE}/${APP_DIR}/${GIT_BRANCH}/pom.xml"
+                        POM_GROUP_ID = pom.groupId
+                        group_id = POM_GROUP_ID.replace('.', '/')
+                        POM_ARTIFACT_ID = pom.artifactId
+                        def props = readProperties  file:'properties.jenkins'
+                        application_prod_name = props['application.name.prd']
+                        application_name = props['application.name.dev']
+                        // POM_VERSION=pom.version
+                        println("POM ::: "+POM_GROUP_ID+" = "+application_name+" = "+POM_VERSION)
+                        dir("${PATH_TO_JAR}") {
+                            def JAR_FILENAME = sh(script: 'find . -maxdepth 1 -type f -name "*.jar" | head -n 1', returnStdout: true).trim()
+                            def JAR_NAME = sh(script: "basename \"${JAR_FILENAME}\" .jar", returnStdout: true).trim()
+
+                            // Extract the filename without the path
+                            def ARTIFACT_FILENAME = "${JAR_NAME}.jar"
+                        
+                            // def ARTIFACT_FILENAME = "testsecond-1.0.1-snapshot-mule-application"  // Update with your artifact filename
+                            echo "#########  Publishing Jfrog Artifactory  ###############################################################"
+                        
+                            // def curlCommand = """
+                            //     curl -X PUT -u your-organization:${GITHUB_TOKEN} \\
+                            //     -H "Accept: application/vnd.github.v3+json" \\
+                            //     --data-binary "@${ARTIFACT_FILENAME}.jar" \\
+                            //     "https://maven.pkg.github.com/your-organization/${APP_DIR}/${group_id}/${application_prod_name}/${POM_VERSION}/${ARTIFACT_FILENAME}.jar"
+                            // """
+
+                            // sh curlCommand
+                            def auth = """                       
+                            curl -H "Authorization: Bearer ${JFROG_TOKEN}" -k -s -o output.txt -w "%{http_code}" -X PUT "https://{your-artifactory-url}/artifactory/{your-repository}/${group_id}/${application_prod_name}/${POM_VERSION}/" -T ${ARTIFACT_FILENAME}
+
+                            """
+                            // sh auth
+                            def response = sh(script: auth, returnStdout: true)
+                            echo "HTTP Status Code: ${response}"
+                            // status_code = response
+                            if (response == '201') {
+                                echo "Artifact ${ARTIFACT_FILENAME} Created Successfully"
+                            } else (response == '404') {
+                                error "Upload failed: ${ARTIFACT_FILENAME} Resource not found."
+                                
+                            }
+                            echo "############################################################################################################"
+
+                    
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+  post {
+        always {
+            cleanWs() // Clean up workspace after the pipeline
+        }
+    }
+}
