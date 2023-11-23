@@ -1,5 +1,6 @@
 # MuleSoft-DevOps
-# Jenkins Pipelines Configuration Readme
+# Jenkins Pipelines Configuration
+This Configuration is based on 'Mule-Maven-Application-Code' Repository
 
 ## 1. Conditional Check Pipeline
 
