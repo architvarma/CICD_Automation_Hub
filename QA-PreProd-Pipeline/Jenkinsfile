@@ -1,0 +1,359 @@
+#!groovy
+import groovy.json.JsonSlurper
+
+def emailRecipients = 'mail@email.com'
+def approver = '' // write the jenkins id of the approver
+def APP_DIR = ''
+def userInput = true
+def gitUrl = "${params.GIT_URL}"
+def GIT_BRANCH = "${params.GIT_BRANCH}"
+def ENVIRONMENT = "${params.Environment}"
+def ARTIFACT_PACKAGE = "${params.Artifact_Package}"
+def mule_env = "${params.Mule_Env}"
+def POM_GROUP_ID = ''
+def POM_ARTIFACT_ID = ''
+def IS_JFROG_PACKAGE_EXISTS=false
+def POM_VERSION
+def ARTIFACT_BUILD_NUMBER = ''
+def deploymentStatus = ''
+def application_name = ''
+def application_prod_name = ''
+def ARTIFACT_FILENAME = ''
+
+def defineJob(GROUP_ID,application_name,application_prod_name,ARTIFACT_PACKAGE,APP_DIR,GIT_BRANCH){
+	
+	currentBuild.displayName = application_name+"#"+ARTIFACT_PACKAGE
+	currentBuild.description = APP_DIR+"/"+GIT_BRANCH+"/"+GROUP_ID+"/"+application_prod_name
+}
+
+def compareVersions(version1, version2) {
+    def v1 = version1.split("\\.")
+    def v2 = version2.split("\\.")
+    
+    for (int i = 0; i < Math.max(v1.size(), v2.size()); i++) {
+        def num1 = i < v1.size() ? v1[i] as int : 0
+        def num2 = i < v2.size() ? v2[i] as int : 0
+        
+        if (num1 > num2) {
+            error "Deployed version is lower than the latest version."
+        }else if (num1 < num2) {
+            return 1
+        }
+
+        if (num1 == num2 && i == v1.size() - 1 && i == v2.size() - 1) {
+            error "Deployed version is equal to the latest version."
+        }
+    }
+    
+    return 0
+}
+
+
+def getRepoNameFromGitUrl(gitUrl) {
+    def parts = gitUrl.split('/')
+    if (parts.size() >= 2) {
+        // return parts[-2] + "/" + parts[-1].replaceAll("\\.git\$", "")
+        return parts[-1].replaceAll("\\.git\$", "")
+    }
+    return null
+}
+
+def FetchLatestTag(APP_DIR){
+    try{
+        def tagname = sh(
+                script: """
+            curl -L \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                https://api.github.com/repos/{your-organization}/${APP_DIR}/tags
+
+            """,
+                returnStdout: true
+            ).trim()
+        def versions = readJSON text: tagname
+            if (versions) {
+                // echo "Available Tags:"
+                versions.each { version ->
+                    // echo version.name // Display the 'name' field
+                    version.name
+                }
+            } else {
+                echo "No Tag Found."
+            }
+    }catch (Exception e) {
+        echo "New Repository, Hence No Tag is available "
+    }
+}
+
+pipeline {
+    agent {
+	label 'default'
+    }
+
+    environment {
+        GITHUB_TOKEN= credentials('github_token_ap')
+        JFROG_TOKEN= credentials('jfrog_token')
+        
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script{
+                    def repoName = getRepoNameFromGitUrl(gitUrl)
+                    APP_DIR=repoName
+                    echo "BRANCH = ${GIT_BRANCH}"
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                // checkout scm
+                        checkout(
+                                scm: [$class: 'GitSCM',
+                                    branches: [[name: "refs/remotes/origin/${GIT_BRANCH}"]],
+                                    extensions: [],
+                                    userRemoteConfigs: [[url: gitUrl, credentialsId: 'mention your credentials ID']]
+                                ]
+                         )
+                        def props = readProperties  file:'properties.jenkins'
+                        application_name = props['application.name.'+ENVIRONMENT+'']
+                        application_prod_name = props['application.name.prd']
+                    }
+                    def JAR_VERSION
+                    pom = readMavenPom file: "${env.WORKSPACE}/${APP_DIR}/${GIT_BRANCH}/pom.xml"
+                    POM_GROUP_ID = pom.groupId
+                    POM_ARTIFACT_ID = pom.artifactId
+                    POM_VERSION=pom.version
+                    artifact_package_delimit = ARTIFACT_PACKAGE.split('-')
+                    // JAR_NAME= artifact_package_delimit[0]
+                    JAR_VERSION = artifact_package_delimit[0]
+                    ARTIFACT_BUILD_NUMBER=artifact_package_delimit[2]
+                    println("POM ::: "+POM_GROUP_ID+" = "+POM_ARTIFACT_ID+" = "+ARTIFACT_PACKAGE)
+                    defineJob(pom.groupId,application_name,application_prod_name,ARTIFACT_PACKAGE,APP_DIR,GIT_BRANCH)
+                    // TAGVERSION=JAR_VERSION.split('-')
+                    // TAG_VERSION=TAGVERSION[0]
+                    // echo "tag: ${TAG_VERSION}"
+                    def availableTag = FetchLatestTag(APP_DIR)
+                    def latestTag = ''
+                    availableTag.each { version ->
+                        def currentTag = version.name
+                        if (currentTag > latestTag || latestTag.isEmpty()) {
+                            latestTag = currentTag
+                        }
+                    }
+                    if (latestTag.isEmpty()) {
+                        echo "No versions found. This is a new repo."
+                    } else {
+                        echo "Latest Tag: ${latestTag}"
+                        echo "################################################################################################"
+                        echo "### Checking if the version deploy is higher than the version which is already deployed ###"
+                        echo "################################################################################################"
+                        def version1 = "${latestTag}"
+                        // version1 = version1.substring(1)
+                        def version2 = "${JAR_VERSION}.${ARTIFACT_BUILD_NUMBER}"
+                        echo "LatestTag: ${version1} :: ArtifactVersion: ${version2}"
+                        def result = compareVersions(version1, version2)
+                        echo "${result}"
+                    }
+                }
+                
+            }
+        }
+
+        stage('Check Code Conflict') {
+            steps {
+                script {
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                        def mainBranch = 'main'
+                        def devBranch = 'origin/develop'
+                        def featureBranch = "origin/${GIT_BRANCH}"
+                        echo "featureBranch: ${featureBranch}"
+                        def tempBranch = "temp-${GIT_BRANCH}" // Create a temporary branch name
+
+                        sh 'git config --global user.name "username"'
+                        sh 'git config --global user.email "mail@email.com"'
+                        // sh 'git config --list'
+                                             
+                        // Create and checkout a temporary branch for conflict check from feature branch
+                        sh "git checkout -b ${tempBranch} ${featureBranch}"
+                        
+                        // Fetch latest changes from remote branches
+                        // sh "git fetch origin ${mainBranch}:${mainBranch} ${devBranch}:${devBranch} ${featureBranch}:${featureBranch}"
+                        
+                        // Attempt to merge the feature branch into dev without committing
+                        def mergeOutput = sh(script: "git checkout ${devBranch} && git merge --no-commit ${tempBranch}", returnStdout: true)
+                        
+                        if (mergeOutput.contains("CONFLICT")) {
+                            echo "==================================================="
+																
+image = """
+   _                    _
+ _( )                  ( )_
+(_, |       __ __      | ,_)
+   \\'\\     /  ^  \\    /'/
+    '\\'\\,/\\       \\,/'/'
+       '\\| []   []  |/'
+         (_  /^\\  _)
+           \\  ~  /
+           /HHHHH\\
+         /'/{^^^}\\'\\
+     _,/'/'  ^^^   '\\'\\,_
+   (_,  |            |  ,_)
+      (_)            (_)  
+"""
+                            print(image)
+                            echo "##############################################################################"
+                            echo "####  Conflict has been found.Resolve the issue ASAP before deploying the code  ####"
+                            echo "##############################################################################"
+                            currentBuild.result = 'FAILURE'
+                            error "Code conflicts detected. Aborting deployment."
+                        } else {
+                            echo "No code conflicts found. Proceeding with deployment."
+                            sh "git branch -D ${tempBranch}" // Delete the temporary branch
+                            sh "git reset --hard ${devBranch}"
+                            sh "git checkout ${featureBranch}" // Switch back to the feature branch
+
+                        }
+                    }
+                }
+            }
+        }
+    
+        stage('Dowload Artifact') {
+            steps {
+              script{
+                dir("${APP_DIR}/${GIT_BRANCH}"){
+                    echo "#########################################################################################"
+                    echo "####  Downloading Artifact for ${application_name} version ${ARTIFACT_PACKAGE} ####"
+                    echo "#########################################################################################"
+                    pom = readMavenPom file: "${env.WORKSPACE}/${APP_DIR}/${GIT_BRANCH}/pom.xml"
+                    POM_GROUP_ID = pom.groupId
+                    group_id = POM_GROUP_ID.replace('.', '/')
+                    ARTIFACT_FILENAME = "${application_prod_name}-${ARTIFACT_PACKAGE}-mule-application.jar"
+		            if(!fileExists('target')){
+                        echo "Creating target folder......"
+                        sh 'mkdir target'
+                    }else {
+                        echo 'Target folder already exists.'
+                    }
+                    def auth = """
+                            curl -H "Authorization: Bearer ${JFROG_TOKEN}" -k -w "%{http_code}" -X GET "https://{your-artifactory-url}/artifactory/{repository-name}/${group_id}/${application_prod_name}/${ARTIFACT_PACKAGE}/${ARTIFACT_FILENAME}?skipUpdateStats=true" -o target/${ARTIFACT_FILENAME}
+
+                            """
+                    def is_package_exists = sh(script: auth, returnStdout: true)
+
+                    if(is_package_exists == "200"){
+                        echo "File Download Successfully"
+					    IS_JFROG_PACKAGE_EXISTS = true
+					}else{
+                    error "File Not Found Aborting the further stages...."
+					}
+
+                }
+              }
+            }
+        }
+
+        stage('Promotion to QA/PreProd'){
+            steps{
+                script{
+                    dir("${APP_DIR}/${GIT_BRANCH}"){
+                        if (!IS_JFROG_PACKAGE_EXISTS) {
+                            echo "Aborting the further stages...."
+                            currentBuild.result = 'ABORTED'
+                            error("Jfrog package does not exist, build aborted.")
+                        } else {
+                            def environment = "${ENVIRONMENT}" // Assuming you have ENVIRONMENT defined somewhere
+                            def applicationNameKey = ""
+
+                            if (environment == 'qa') {
+                                applicationNameKey = 'application.name.qa'
+                            } else if (environment == 'preprod') {
+                                applicationNameKey = 'application.name.preprod'
+                            } else {
+                                echo "Unsupported environment: ${environment}"
+                                currentBuild.result = 'ABORTED'
+                                error("Unsupported environment: ${environment}, build aborted.")
+                            }
+
+                            try {
+                                // notifyApproval("Test")
+                                def props = readProperties file: 'properties.jenkins'
+                                application_name = props[applicationNameKey]
+                                timeout(time: 5, unit: 'MINUTES') {
+                                    userInput = input(
+                                        id: 'Launch', message: 'Approval Required', submitter: approver, parameters: [
+                                            booleanParam(defaultValue: false, description: '', name: "Promote '${application_name}' application to CloudHub ${ENVIRONMENT} Environment?")
+                                        ]
+                                    )
+                                }
+                            } catch (err) { // timeout reached or not approved
+                                userInput = false
+                                // throw err
+                                echo "Aborted ..."
+                                currentBuild.result = 'ABORTED'
+                                error("Approval timeout or not approved, build aborted.")
+                            }
+
+                            if (userInput == true && environment == 'qa') {
+                                try {
+                                    timeout(time: 5, unit: 'MINUTES') {
+                                        deploymentTargetInput = input(
+                                            id: 'DeploymentTarget', message: 'Select Deployment Target', submitter: approver, parameters: [
+                                                choice(name: 'DeploymentTarget', choices: ['CloudHub', 'Hybrid'], description: 'Select the QA deployment target')
+                                            ]
+                                        )
+                                    }
+                                } catch (deploymentErr) {
+                                    deploymentTargetInput = false
+                                    echo "Deployment target selection aborted ..."
+                                    currentBuild.result = 'ABORTED'
+                                    error("Deployment target selection timeout or aborted, build aborted.")
+                                }
+                            }
+                        }
+		
+                    }
+                }
+            }
+        }
+
+        stage('Deployment to QA/PreProd'){
+                steps{
+                    script{
+                        dir("${APP_DIR}/${GIT_BRANCH}"){
+                            configFileProvider([configFile(fileId: 'your-file-id', variable: 'mvn_settings')]) {
+                                withCredentials([string(credentialsId: 'anypoint_platform_clientID_'+ENVIRONMENT+'', variable: 'client_id'), string(credentialsId: 'anypoint_platform_clientSecret_'+ENVIRONMENT+'', variable: 'client_secret'), string(credentialsId: 'anypoint_connect_client_ID', variable: 'connect_client_id'), string(credentialsId: 'anypoint_connect_client_secret', variable: 'connect_client_secret'), string(credentialsId: 'mulesoft-runtime-key-nonprod', variable: 'runtimekey_nonprod')]){
+                                    def props = readProperties  file:'properties.jenkins'
+                                    application_name = props['application.name.'+ENVIRONMENT+'']
+                                    workers_type = props['workers.type.'+ENVIRONMENT+'']
+                                    workers = props['workers.'+ENVIRONMENT+'']
+                                    mule_version = props['mule.version.'+ENVIRONMENT+'']
+                                    echo "#########################################################################################"
+                                    echo "####  Starting Deployment for ${application_name} version ${ARTIFACT_PACKAGE} ####"
+                                    echo "#########################################################################################" 
+                                    if (userInput == true && ENVIRONMENT == "qa" && deploymentTargetInput == "CloudHub"){
+                                        echo "deployment to qa Cloudhub"
+                                        sh "mvn mule:deploy -s ${mvn_settings} -B -U -e -V -DskipTests -DmuleDeploy -DskipMunitTests -Denvironment=QA -DmuleEnv=${mule_env} -DartifactID=${application_name} -Druntimekey='${runtimekey_nonprod}' -Dmule.artifact=target/${application_prod_name}-${ARTIFACT_PACKAGE}-mule-application.jar -Dconnect_clientid=${connect_client_id} -Dconnect_clientsecret=${connect_client_secret} -DbuildNumber=${ARTIFACT_BUILD_NUMBER} -Dclientid=${client_id} -Dworkers=${workers} -Dworkers_type=${workers_type} -Dclientsecret=${client_secret}"    
+                                    }else if (userInput == true && ENVIRONMENT == "qa" && deploymentTargetInput == "Hybrid"){
+                                        echo "deployment to qa Hybrid"
+                                        sh "mvn mule:deploy -s ${mvn_settings} -B -U -e -V -DskipTests -DmuleDeploy -Phybrid -DskipMunitTests -Denvironment=QA -DmuleEnv=${mule_env} -DartifactID=${application_name} -Druntimekey='${runtimekey_nonprod}' -Dmule.artifact=target/${application_prod_name}-${POM_VERSION}-mule-application.jar -Dconnect_clientid=${connect_client_id} -Dconnect_clientsecret=${connect_client_secret} -DbuildNumber=${ARTIFACT_BUILD_NUMBER} -Dclientid=${client_id} -Dclientsecret=${client_secret}"
+                                    }else if (userInput == true && ENVIRONMENT == "preprod"){
+                                        echo "deployment to preprod cloudhub"
+                                        sh "mvn mule:deploy -s ${mvn_settings} -B -U -e -V -DskipTests -DmuleDeploy -DskipMunitTests -Denvironment=Pre-Prod -DmuleEnv=${mule_env} -DartifactID=${application_name} -Druntimekey='${runtimekey_nonprod}' -Dmule.artifact=target/${application_prod_name}-${ARTIFACT_PACKAGE}-mule-application.jar -Dconnect_clientid=${connect_client_id} -Dconnect_clientsecret=${connect_client_secret} -DbuildNumber=${ARTIFACT_BUILD_NUMBER} -Dclientid=${client_id} -Dworkers=${workers} -Dworkers_type=${workers_type} -Dclientsecret=${client_secret}"
+                                    }
+                            // deploymentStatus = "Deployment successful"
+                            // echo "Deployment is Successfull"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+
+    post {
+        always {
+            cleanWs() // Clean up workspace after the pipeline
+        }
+    }
+}
