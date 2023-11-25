@@ -8,7 +8,7 @@ This repository hosts a Jenkins pipeline script designed for automating GitHub r
    - Copies template files to the workspace if specified.
    - Configures global Git user information.
    - Creates and pushes the `dev` branch.
-   - Creates and pushes multiple feature branches based on the provided branch names.
+   - Creates and pushes **multiple feature branches** based on the provided branch names.
    - Displays the Git log with a graph representation of the branches.
 
 ## Usage Instructions
