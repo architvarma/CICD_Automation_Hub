@@ -1,0 +1,133 @@
+#!groovy
+// Import classes from specific plugins
+import groovy.json.JsonSlurper
+
+def gitRepo = "${params.GIT_REPO}"
+def gitBranch = "${params.GIT_BRANCH}"
+
+
+pipeline {
+    agent {
+	
+    label 'default'
+        
+    }
+
+    stages {
+        stage('Create GitHub Repository') {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'github_token', variable: 'GITHUBTOKEN')]) {
+                    def repo = """
+                    curl -L \
+                     -H "Accept: application/vnd.github+json" \
+                     -H "Authorization: Bearer ${GITHUBTOKEN}" \
+                     -H "X-GitHub-Api-Version: 2022-11-28" \
+                      -k -s -w "%{http_code}" -o output.txt https://api.github.com/repos/OWNER/${gitRepo}
+                     
+                     """
+
+
+                    def createRepo = """
+                    curl -L \
+                    -X POST \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "Authorization: Bearer ${GITHUBTOKEN}" \
+                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                    -k -w "%{http_code}" -o output.txt https://api.github.com/user/repos \
+                    -d '{"name":"${gitRepo}","description":"This is a ${gitRepo} Application repository!","homepage":"https://github.com","private":true,"auto_init":true}'
+                    
+                    """
+                    def response = sh(script: repo, returnStdout: true)
+                    echo "HTTP Status Code: ${response}"
+
+                    if (response == "200") {
+                        error "Repo is already available"
+                    } else {
+                        echo "Creating the ${gitRepo}...."
+                        def isRepoCreated = sh(script: createRepo, returnStdout: true)
+                        echo "HTTP Status Code: ${isRepoCreated}"
+                        if (isRepoCreated == "201") {
+                            echo "Repo ${gitRepo} created"
+                        } else {
+                            error "Failed to create repo. HTTP status: ${isRepoCreated}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Create a Webhook'){
+            steps{
+                script{
+                    withCredentials([string(credentialsId: 'github_token', variable: 'GITHUBTOKEN')]) {
+                    def createwebhook = """
+                    curl -L \
+                    -X POST \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "Authorization: Bearer ${GITHUBTOKEN}" \
+                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                    -k -w "%{http_code}" -o output.txt https://api.github.com/repos/OWNER/${gitRepo}/hooks \
+                    -d '{"name":"web","active":true,"events":["push","pull_request"],"config":{"url":"https://example.com/webhook","content_type":"json","insecure_ssl":"0"}}'
+
+                    """
+                    def webhook = sh(script: createwebhook, returnStdout: true)
+                    echo "HTTP Status Code: ${webhook}"
+
+                    if (webhook == "201"){
+                        echo "Webhook is Created"
+                    }else{
+                        error "Webhook is not Created"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Create Github Branch'){
+            steps{
+                script{
+                    withCredentials([string(credentialsId: 'github_token', variable: 'GITHUBTOKEN')]) {
+                        dir("${gitRepo}"){
+                            
+                            def giturl = "https://github.com/OWNER/${gitRepo}.git"
+                            checkout(
+                                scm: [$class: 'GitSCM',
+                                    branches: [[name: "refs/remotes/origin/main"]],
+                                    extensions: [],
+                                    userRemoteConfigs: [[url: giturl, credentialsId: 'your-credential-id']]
+                                ]
+                            )
+                            dir("${WORKSPACE}"){
+                                sh "cp files/* ${WORKSPACE}/${gitRepo}/"
+                            }
+                            sh 'git config --global user.name "username"'
+                            sh 'git config --global user.email "mail@email.com"'
+                            sh "git remote -v"
+                            sh 'git add .'
+                            sh 'git commit --only --allow-empty -m "Initial commit"'
+                            sh 'git remote set-url origin https://github.com/OWNER/'+gitRepo+'.git'
+                            sh 'git push https://OWNER:$GITHUBTOKEN@github.com/OWNER/'+gitRepo+'.git HEAD:main'
+                            sh 'git checkout -b dev'
+                            sh 'git add .'
+                            sh 'git commit --only --allow-empty -m "Initial commit"'
+                            sh "git push https://OWNER:$GITHUBTOKEN@github.com/OWNER/${gitRepo}.git HEAD:dev"
+                            sh 'git checkout -b '+gitBranch+''
+                            sh 'git add .'
+                            sh 'git commit --only --allow-empty -m "Initial commit"'
+                            sh "git push https://OWNER:$GITHUBTOKEN@github.com/OWNER/${gitRepo}.git HEAD:${gitBranch}"
+
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs() // Clean up workspace after the pipeline
+        }
+    }
+}
