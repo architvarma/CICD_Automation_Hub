@@ -1,6 +1,7 @@
 # MultiBranch Pipeline
 
 This repository hosts a Jenkins pipeline script designed for automating GitHub repository creation and configuration. The pipeline encompasses the following key stage:
+
 **Stage1, Stage2 are comman as of [Repository-Branch-Creation Pipeline](https://github.com/architvarma/CICD_Automation_Hub/blob/main/GitHub/Repository-Branch-Creation/Jenkinsfile)**
 ## 3. Create GitHub Branches
    - Checks out the `main` branch and initializes the repository.
