@@ -100,7 +100,7 @@ pipeline {
                                 ]
                             )
                             dir("${WORKSPACE}"){
-                                sh "cp files/* ${WORKSPACE}/${gitRepo}/"
+                                sh "cp path/to/files/* ${WORKSPACE}/${gitRepo}/" // If you want to add any template files
                             }
                             sh 'git config --global user.name "username"'
                             sh 'git config --global user.email "mail@email.com"'
