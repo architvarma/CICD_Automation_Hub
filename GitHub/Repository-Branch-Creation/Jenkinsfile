@@ -106,7 +106,7 @@ pipeline {
                             sh 'git config --global user.email "mail@email.com"'
                             sh "git remote -v"
                             sh 'git add .'
-                            sh 'git commit --only --allow-empty -m "Initial commit"'
+                            sh 'git commit -m "Initial commit"'
                             sh 'git remote set-url origin https://github.com/OWNER/'+gitRepo+'.git'
                             sh 'git push https://OWNER:$GITHUBTOKEN@github.com/OWNER/'+gitRepo+'.git HEAD:main'
                             sh 'git checkout -b dev'
