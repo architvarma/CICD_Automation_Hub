@@ -14,7 +14,7 @@ This repository contains a Jenkins pipeline script for automating various GitHub
 
 ### 3. **Create GitHub Branch**
    - Checks out the `main` branch.
-   - Copies files from the `files` directory to the repository workspace.
+   - Copies files from the `path/to/files` directory to the repository workspace.
    - Commits an initial empty commit to `main`.
    - Creates and pushes a new `dev` branch.
    - Creates and pushes a new branch based on the provided branch name (`gitBranch`).
