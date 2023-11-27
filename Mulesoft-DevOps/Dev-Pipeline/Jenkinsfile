@@ -355,7 +355,6 @@ image = """
                                 echo "mule version: ${mule_version}"
                                 // echo "ARTIFACT_BUILD_NO: ${ARTIFACT_BUILD_NO}"
                                 echo "ARTIFACT PACKAGE: ${POM_VERSION}"
-                                def deployenv
                                 echo "##############################################################################"
                                 echo "####  Starting Build Process for ${application_prod_name} version ${POM_VERSION}  ####"
                                 echo "##############################################################################"
