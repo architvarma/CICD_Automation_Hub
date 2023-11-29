@@ -1,0 +1,191 @@
+#!groovy
+// Import classes from specific plugins
+import groovy.json.JsonSlurper
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+
+def groupID = "${params.GROUP_ID}"
+def selectedApplication = ''
+def selectedFolder = ''
+
+def getAvailableFolders(folders) {
+    def folderNames = []
+
+    folders.each { folderEntry ->
+        def folderName = folderEntry[0].substring(0, folderEntry[0].indexOf('/'))
+        folderNames.add("'$folderName'")
+    }
+
+    echo "Available folders: ${folderNames}"
+    return folderNames
+}
+
+pipeline {
+    agent {
+        label 'default'
+    }
+
+    
+    environment {
+        JFROG_TOKEN= credentials('jfrog_token')
+    }
+
+    stages {
+        stage('Select the Application'){
+            steps{
+                script{
+                    GROUPID = groupID.replace('.', '/')
+                    def auth = """                       
+                    curl -H "Authorization: Bearer ${JFROG_TOKEN}" -k -X GET "https://{your-artifactory-url}/artifactory/{your-repository}/${GROUPID}/" 
+
+                    """
+                    // sh auth
+                    
+                    def html = sh(script: auth, returnStdout: true).trim()
+
+                    def pattern = /<a href="([^"]+)">([^<]+)<\/a>\s+(\d{2}-\w{3}-\d{4} \d{2}:\d{2})/
+
+                
+                    def folders = (html =~ pattern).collect { match ->
+                        def folderName = match[1]
+                        def lastModified = match[3]
+
+                        // Parse the last modified date to compare
+                        def dateFormat = new SimpleDateFormat("dd-MMM-yyyy HH:mm")
+                        def lastModifiedDate = dateFormat.parse(lastModified)
+
+                        [folderName, lastModifiedDate]
+                    }
+                    echo "folders: ${folders}"
+                    def availableFolders = getAvailableFolders(folders)
+                    echo "folder: ${availableFolders}"
+
+                    // Define an input step to prompt the user to select a folder
+                    selectedApplication = input(
+                    id: 'folderInput',
+                    message: 'Select a folder:',
+                    parameters: [
+                        activeChoice(
+                            choiceType: 'PT_SINGLE_SELECT',
+                            description: 'Select the Application from the Dropdown List',
+                            filterLength: 1,
+                            filterable: false,
+                            name: 'Applications',
+                            script: [
+                                $class: 'GroovyScript',
+                                fallbackScript: [
+                                    classpath: [],
+                                    sandbox: false,
+                                    script: "return['Could not get The Application']"
+                                ],
+                                script: [
+                                    classpath: [],
+                                    sandbox: true,
+                                    script: "${availableFolders}"
+                                ]
+                            ]
+                        )
+                    ]
+                )
+
+
+                    echo "Selected folder: ${selectedApplication}"
+                }
+            }
+        }
+        stage('Fetching Artifact Packages') {
+            steps {
+                script{
+                    GROUPID = groupID.replace('.', '/')
+                    def auth = """                       
+                    curl -H "Authorization: Bearer ${JFROG_TOKEN}" -k -X GET "https://{your-artifactory-url}/artifactory/{your-repository}/${GROUPID}/${selectedApplication}/" 
+
+                    """
+                    // sh auth
+                    
+                    def html = sh(script: auth, returnStdout: true).trim()
+
+                    def pattern = /<a href="([^"]+)">([^<]+)<\/a>\s+(\d{2}-\w{3}-\d{4} \d{2}:\d{2})/
+
+                
+                    def folders = (html =~ pattern).collect { match ->
+                        def folderName = match[1]
+                        def lastModified = match[3]
+
+                        // Parse the last modified date to compare
+                        def dateFormat = new SimpleDateFormat("dd-MMM-yyyy HH:mm")
+                        def lastModifiedDate = dateFormat.parse(lastModified)
+
+                        [folderName, lastModifiedDate]
+                    }
+                    echo "folders: ${folders}"
+                    def availableFolders = getAvailableFolders(folders)
+                    echo "folder: ${availableFolders}"
+
+                    // Define an input step to prompt the user to select a folder
+                    selectedFolder = input(
+                    id: 'folderInput',
+                    message: 'Select a folder:',
+                    parameters: [
+                        activeChoice(
+                            choiceType: 'PT_MULTI_SELECT',
+                            description: 'Select the Artifact Package from the Dropdown List',
+                            filterLength: 1,
+                            filterable: false,
+                            name: 'Artifact Packages',
+                            script: [
+                                $class: 'GroovyScript',
+                                fallbackScript: [
+                                    classpath: [],
+                                    sandbox: false,
+                                    script: "return['Could not get The Artifact Package']"
+                                ],
+                                script: [
+                                    classpath: [],
+                                    sandbox: true,
+                                    script: "${availableFolders}"
+                                ]
+                            ]
+                        )
+                    ]
+                )
+
+
+                    echo "Selected folder: ${selectedFolder}"
+                }
+            }
+        }
+
+        stage('Delete Artifact'){
+            steps{
+                script{
+                    def SelectFolder = selectedFolder.split(',')
+
+                    GROUPID = groupID.replace('.', '/')
+
+                    // Ensure SelectFolder is a list even if only one value is selected
+                    if (SelectFolder.size() == 1) {
+                        SelectFolder = [SelectFolder[0].trim()]
+                    }
+
+                    for(def deletefolder in SelectFolder){
+                       def auth = """                       
+                    curl -H "Authorization: Bearer ${JFROG_TOKEN}" -k -X DELETE "https://{your-artifactory-url}/artifactory/{your-repository}/${GROUPID}/${selectedApplication}/${deletefolder.trim()}" 
+
+                    """
+                    sh auth 
+                    }
+                }
+            }
+        }
+        
+    }
+
+    post {
+        always {
+            cleanWs() // Clean up workspace after the pipeline
+        }
+    }
+}
